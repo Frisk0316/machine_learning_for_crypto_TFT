@@ -1,0 +1,63 @@
+{
+    "data_path": "../deep_learning_for_crypto/datasets/btc_panel.npz",
+    "output_dir": "./checkpoints",
+    "figure_dir": "./outputs",
+
+    "lookback": 8,
+    "train_ratio": 0.70,
+    "valid_ratio": 0.15,
+
+    "model_type": "tft",
+    "hidden_dim": 32,
+    "num_heads": 2,
+    "lstm_layers": 1,
+    "dropout": 0.30,
+
+    "learning_rate": 0.001,
+    "weight_decay": 1e-4,
+    "batch_size": 128,
+    "epochs": 150,
+    "early_stopping_patience": 20,
+    "lr_scheduler_patience": 10,
+    "lr_scheduler_factor": 0.5,
+    "warmup_epochs": 10,
+    "ranking_temperature": 1.0,
+
+    "num_seeds": 8,
+
+    "feature_configs": {
+        "Price+Technical": [0,1,2,3,4,5,6,7,8,9,10],
+        "+Onchain":        [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+        "All":             [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+                            16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32],
+        "+Trump":          [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,
+                            16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,
+                            44,45,46,47,48]
+    },
+
+    "_feature_names": [
+        "r1w","r4w","r12w","r26w","r52w",
+        "rsi_14","bb_pct","vol_ratio","atr_pct","obv_change","vol_usd",
+        "active_addr","tx_count","nvt","exchange_net_flow","mvrv",
+        "fear_greed","spx_ret","dxy_ret","vix","gold_ret","silver_ret",
+        "dji_ret","spx_vol_chg","gold_vol_chg","silver_vol_chg","dji_vol_chg",
+        "btc_etf_inflow_norm","polymarket_btc","btc_etf_inflow_raw",
+        "eth_etf_inflow_norm","eth_etf_inflow_raw","btc_etf_vol",
+        "trump_post_count","trump_caps_ratio","trump_tariff_score",
+        "trump_crypto_score","trump_sentiment"
+    ],
+
+    "_v5_changes": {
+        "hidden_dim": "64 → 32 (reduce overfitting)",
+        "num_heads": "4 → 2 (match smaller dim)",
+        "lstm_layers": "2 → 1 (reduce capacity)",
+        "dropout": "0.15 → 0.30 (stronger regularization)",
+        "weight_decay": "1e-5 → 1e-4 (stronger L2)",
+        "lookback": "12 → 8 (reduce temporal noise)",
+        "warmup_epochs": "new: 10 (stabilize early training)",
+        "ranking_temperature": "new: 1.0 (ListNet temperature)",
+        "loss": "MSE → ListNet ranking loss",
+        "training": "random batch → cross-sectional batch",
+        "architecture": "added Cross-Asset Attention, LightVSN, position embedding"
+    }
+}
