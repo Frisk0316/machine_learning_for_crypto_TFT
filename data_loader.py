@@ -124,8 +124,19 @@ def load_panel(npz_path):
     return f['data'], f['date'], f['wficn'], f['variable']
 
 
-def make_splits(T, train_ratio=0.70, valid_ratio=0.15):
+def detect_trump_start(data, trump_feature_indices, unk=UNK):
+    """Find the first week where Trump features have valid (non-UNK) data."""
+    feat_cols = [f + 1 for f in trump_feature_indices]  # +1 because col 0 = target
+    for t in range(data.shape[0]):
+        for n in range(data.shape[1]):
+            vals = data[t, n, feat_cols]
+            if np.all(vals > unk + 1):
+                return t
+    return 0
+
+
+def make_splits(T, train_ratio=0.70, valid_ratio=0.15, train_start=0):
     """Chronological train / valid / test split."""
     t_train = int(T * train_ratio)
     t_valid = int(T * (train_ratio + valid_ratio))
-    return range(0, t_train), range(t_train, t_valid), range(t_valid, T)
+    return range(train_start, t_train), range(t_train, t_valid), range(t_valid, T)

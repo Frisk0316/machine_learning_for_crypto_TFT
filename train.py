@@ -22,7 +22,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from data_loader import (
-    load_panel, make_splits, CrossSectionalDataset, get_cross_sectional_data
+    load_panel, make_splits, detect_trump_start,
+    CrossSectionalDataset, get_cross_sectional_data
 )
 from models import build_model
 
@@ -116,11 +117,21 @@ def predict_cross_section(model, cs_data, device):
 # Training loop (v5: cross-sectional + ranking loss)
 # ═══════════════════════════════════════════════════════════════════════
 
+def set_deterministic(seed):
+    """Ensure full reproducibility across CPU and GPU."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def train_one_seed(cfg, data, train_idx, valid_idx, test_idx,
                    feature_indices, feat_name, seed, device):
     """Train a single model with cross-sectional ranking loss."""
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    set_deterministic(seed)
 
     lookback = cfg['lookback']
     n_features = len(feature_indices)
@@ -255,15 +266,29 @@ def train_ensemble(cfg, data, dates, assets, variables,
     num_seeds = cfg.get('num_seeds', 8)
     model_type = cfg.get('model_type', 'tft')
 
+    trump_feat_set = set(cfg.get('trump_feature_indices', [44, 45, 46, 47, 48]))
+    trump_start = cfg.get('_detected_train_start_week', 0)
+
     for feat_name, feat_indices in feat_configs.items():
-        print(f"\n{'='*60}")
-        print(f"  Feature set: {feat_name} ({len(feat_indices)} features)")
-        print(f"{'='*60}")
+        # Use Trump-aware training start if this config includes Trump features
+        has_trump = bool(trump_feat_set & set(feat_indices))
+        if has_trump and trump_start > 0:
+            effective_train_idx = range(trump_start, train_idx.stop)
+            print(f"\n{'='*60}")
+            print(f"  Feature set: {feat_name} ({len(feat_indices)} features)")
+            print(f"  Trump-aware training: week {trump_start}–{train_idx.stop-1}"
+                  f" ({len(effective_train_idx)} weeks, was {len(train_idx)})")
+            print(f"{'='*60}")
+        else:
+            effective_train_idx = train_idx
+            print(f"\n{'='*60}")
+            print(f"  Feature set: {feat_name} ({len(feat_indices)} features)")
+            print(f"{'='*60}")
 
         seed_results = []
         for seed in range(num_seeds):
             res = train_one_seed(
-                cfg, data, train_idx, valid_idx, test_idx,
+                cfg, data, effective_train_idx, valid_idx, test_idx,
                 feat_indices, feat_name, seed, device
             )
             seed_results.append(res)
@@ -359,6 +384,14 @@ def main():
     T, N, _ = data.shape
     print(f"Panel: T={T} weeks, N={N} assets, M={len(variables)} features")
     print(f"Date range: {dates[0]} → {dates[-1]}")
+
+    # Detect Trump data start
+    trump_indices = cfg.get('trump_feature_indices', [44, 45, 46, 47, 48])
+    train_start_week = cfg.get('train_start_week', None)
+    if train_start_week is None:
+        train_start_week = detect_trump_start(data, trump_indices)
+    cfg['_detected_train_start_week'] = train_start_week
+    print(f"Trump data starts: week {train_start_week} ({dates[train_start_week]})")
 
     # Split
     train_idx, valid_idx, test_idx = make_splits(
