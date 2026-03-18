@@ -1,9 +1,10 @@
 """
 evaluate.py — Portfolio evaluation, comparison tables, and visualisation
-for LSTM / TFT cross-sectional crypto return prediction.
+for LSTM / TFT / traditional ML cross-sectional crypto return prediction.
 
 Usage:
     python evaluate.py --config config.json [--model tft]
+    python evaluate.py --config config.json --compare-all   # cross-model comparison
 """
 
 import argparse
@@ -350,6 +351,189 @@ def save_csv_tables(all_metrics, model_type, out_dir):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Market portfolio benchmark
+# ═══════════════════════════════════════════════════════════════════════
+
+def load_market_portfolio(output_dir):
+    """Load market portfolio results from NPZ."""
+    path = os.path.join(output_dir, 'market_portfolio.npz')
+    if not os.path.exists(path):
+        return None
+    f = np.load(path, allow_pickle=True)
+    result = {}
+    for k in f.files:
+        result[k] = f[k]
+    return result
+
+
+def print_market_portfolio(market, label="Market Portfolio"):
+    """Print market portfolio benchmark."""
+    print(f"\n{'='*80}")
+    print(f"  {label}")
+    print(f"{'='*80}")
+    ew_sr = float(market['ew_sr'])
+    ew_mean = float(market['ew_mean'])
+    T = int(market['T_weeks'])
+    print(f"  EW Market: mean={ew_mean:+.2f}%/week, SR={ew_sr:+.3f}, T={T}")
+    if 'vw_sr' in market:
+        vw_sr = float(market['vw_sr'])
+        vw_mean = float(market['vw_mean'])
+        print(f"  VW Market: mean={vw_mean:+.2f}%/week, SR={vw_sr:+.3f}")
+    else:
+        print("  VW Market: N/A (no market_cap data)")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Cross-model comparison (--compare-all)
+# ═══════════════════════════════════════════════════════════════════════
+
+ALL_MODEL_NAMES = [
+    'tft', 'lstm',
+    'ols', 'elasticnet', 'pca_regression', 'pls',
+    'random_forest', 'gradient_boosting',
+]
+
+DISPLAY_NAMES = {
+    'tft': 'TFT', 'lstm': 'LSTM',
+    'ols': 'OLS', 'elasticnet': 'ElasticNet',
+    'pca_regression': 'PCA', 'pls': 'PLS',
+    'random_forest': 'RF', 'gradient_boosting': 'GBT',
+}
+
+
+def compare_all_models(cfg):
+    """Load all available model results and print cross-model comparison."""
+    output_dir = cfg['output_dir']
+    feat_configs = cfg['feature_configs']
+    feat_names_list = list(feat_configs.keys())
+
+    # Collect SR for each model × feature config
+    model_srs = {}  # {model_name: {feat_name: sr_pw}}
+    available = []
+
+    for model_name in ALL_MODEL_NAMES:
+        npz_path = os.path.join(output_dir, f'{model_name}_results.npz')
+        if not os.path.exists(npz_path):
+            continue
+        try:
+            results, dates, assets, test_times = load_results(npz_path, feat_configs)
+            srs = {}
+            for name, res in results.items():
+                m = compute_portfolio_metrics(
+                    res['ensemble_preds'], res['ensemble_tgts'], res['ensemble_msks']
+                )
+                srs[name] = {'sr_pw': m['sr_pw'], 'sr_ew': m['sr_ew'],
+                             'mean_pw': m['mean_pw'], 't_pw': m['t_pw']}
+            model_srs[model_name] = srs
+            available.append(model_name)
+        except Exception as e:
+            print(f"  Warning: could not load {model_name}: {e}")
+
+    if not available:
+        print("  No model results found.")
+        return
+
+    # Load market portfolio
+    market = load_market_portfolio(output_dir)
+
+    # Print comparison table (SR PW)
+    print(f"\n{'='*100}")
+    print(f"  Cross-Model Comparison: Long-Short SR (PW)")
+    print(f"{'='*100}")
+
+    # Header
+    disp = [DISPLAY_NAMES.get(m, m) for m in available]
+    header_parts = [f"{'Info Set':<20s}"]
+    if market is not None:
+        header_parts.append(f"{'EW Mkt':>7s}")
+        if 'vw_sr' in market:
+            header_parts.append(f"{'VW Mkt':>7s}")
+    for d in disp:
+        header_parts.append(f"{d:>8s}")
+    print(f"  {' │ '.join(header_parts)}")
+    print(f"  {'─'*(len(header_parts)*10)}")
+
+    # Rows
+    for feat_name in feat_names_list:
+        parts = [f"{feat_name:<20s}"]
+        if market is not None:
+            parts.append(f"{float(market['ew_sr']):+7.2f}")
+            if 'vw_sr' in market:
+                parts.append(f"{float(market['vw_sr']):+7.2f}")
+        for model_name in available:
+            srs = model_srs[model_name]
+            if feat_name in srs:
+                parts.append(f"{srs[feat_name]['sr_pw']:+8.2f}")
+            else:
+                parts.append(f"{'N/A':>8s}")
+        print(f"  {' │ '.join(parts)}")
+
+    # Print EW SR table
+    print(f"\n{'='*100}")
+    print(f"  Cross-Model Comparison: Long-Short SR (EW)")
+    print(f"{'='*100}")
+
+    header_parts = [f"{'Info Set':<20s}"]
+    if market is not None:
+        header_parts.append(f"{'EW Mkt':>7s}")
+        if 'vw_sr' in market:
+            header_parts.append(f"{'VW Mkt':>7s}")
+    for d in disp:
+        header_parts.append(f"{d:>8s}")
+    print(f"  {' │ '.join(header_parts)}")
+    print(f"  {'─'*(len(header_parts)*10)}")
+
+    for feat_name in feat_names_list:
+        parts = [f"{feat_name:<20s}"]
+        if market is not None:
+            parts.append(f"{float(market['ew_sr']):+7.2f}")
+            if 'vw_sr' in market:
+                parts.append(f"{float(market['vw_sr']):+7.2f}")
+        for model_name in available:
+            srs = model_srs[model_name]
+            if feat_name in srs:
+                parts.append(f"{srs[feat_name]['sr_ew']:+8.2f}")
+            else:
+                parts.append(f"{'N/A':>8s}")
+        print(f"  {' │ '.join(parts)}")
+
+    # Save CSV
+    out_dir = cfg.get('figure_dir', './outputs')
+    os.makedirs(out_dir, exist_ok=True)
+    import csv
+    path = os.path.join(out_dir, 'cross_model_comparison.csv')
+    with open(path, 'w', newline='') as f:
+        w = csv.writer(f)
+        header = ['Information set']
+        if market is not None:
+            header.append('EW_Market_SR')
+            if 'vw_sr' in market:
+                header.append('VW_Market_SR')
+        for m in available:
+            header.extend([f'{DISPLAY_NAMES.get(m,m)}_SR_PW',
+                          f'{DISPLAY_NAMES.get(m,m)}_SR_EW'])
+        w.writerow(header)
+
+        for feat_name in feat_names_list:
+            row = [feat_name]
+            if market is not None:
+                row.append(f"{float(market['ew_sr']):.3f}")
+                if 'vw_sr' in market:
+                    row.append(f"{float(market['vw_sr']):.3f}")
+            for model_name in available:
+                srs = model_srs[model_name]
+                if feat_name in srs:
+                    row.extend([f"{srs[feat_name]['sr_pw']:.3f}",
+                               f"{srs[feat_name]['sr_ew']:.3f}"])
+                else:
+                    row.extend(['N/A', 'N/A'])
+            w.writerow(row)
+    print(f"\n  Saved: {path}")
+
+    return model_srs, market
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -357,14 +541,26 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='config.json')
     parser.add_argument('--model', default=None)
+    parser.add_argument('--compare-all', action='store_true',
+                        help='Print cross-model comparison table')
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = json.load(f)
-    model_type = args.model or cfg.get('model_type', 'tft')
 
     out_dir = cfg.get('figure_dir', './outputs')
     os.makedirs(out_dir, exist_ok=True)
+
+    # Cross-model comparison mode
+    if args.compare_all:
+        compare_all_models(cfg)
+        # Also print market portfolio
+        market = load_market_portfolio(cfg['output_dir'])
+        if market is not None:
+            print_market_portfolio(market)
+        return
+
+    model_type = args.model or cfg.get('model_type', 'tft')
 
     # Load results
     npz_path = os.path.join(cfg['output_dir'], f'{model_type}_results.npz')
@@ -385,6 +581,11 @@ def main():
     print_table3(all_metrics, model_type)
     print_table_a1(all_metrics, model_type)
     print_comparison_table(all_metrics, model_type)
+
+    # Print market portfolio if available
+    market = load_market_portfolio(cfg['output_dir'])
+    if market is not None:
+        print_market_portfolio(market)
 
     # Generate figures
     print(f"\nGenerating figures...")

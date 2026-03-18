@@ -27,6 +27,30 @@
 
     "num_seeds": 32,
 
+    "traditional_models": {
+        "ols": {},
+        "elasticnet": {
+            "alpha": [0.001, 0.01, 0.1, 1.0],
+            "l1_ratio": [0.1, 0.5, 0.9, 1.0]
+        },
+        "pca_regression": {
+            "n_components": [1, 2, 3, 5]
+        },
+        "pls": {
+            "n_components": [1, 2, 3, 5]
+        },
+        "random_forest": {
+            "max_depth": [1, 2, 3, 5],
+            "max_features": ["sqrt", 0.33, 0.5],
+            "n_estimators": 300
+        },
+        "gradient_boosting": {
+            "max_depth": [1, 2],
+            "learning_rate": [0.01, 0.1],
+            "n_estimators": [100, 300]
+        }
+    },
+
     "feature_configs": {
         "Price+Technical": [0,1,2,3,4,5,6,7,8,9,10],
         "+Onchain":        [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],

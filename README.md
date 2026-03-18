@@ -1,12 +1,13 @@
 # Machine Learning for Crypto — LSTM & Temporal Fusion Transformer
 
-> **v5.2 實驗：修正時間序列模型的橫截面排序缺陷**
+> **v5.3 實驗：時間序列模型 vs 傳統模型 vs 橫截面模型**
 >
 > 基於 v4 發現的四大缺陷（範式錯配、過度參數化、損失函數錯誤、時序不穩定），
 > 本版進行系統性改善：ListNet 排序損失、Cross-Asset Attention、降低模型容量、
-> 時序位置編碼，並與 v3 Gated FFN / v4 原始結果對照。
+> 時序位置編碼，並加入傳統 ML 基準（OLS, ElasticNet, PCA, PLS, RF, GBT）和
+> 市場組合基準，進行全面的模型比較。
 >
-> **v5.2 更新**：32 seeds（原 8）、CUDA 確定性設定、+Trump 特徵組採用 Trump-aware 訓練起點。
+> **v5.3 新增**：6 個傳統 ML 基準、EW 市場組合、Look-Ahead Bias 驗證、全模型比較表。
 
 ---
 
@@ -165,6 +166,41 @@ v4 使用 MSE 損失，最小化絕對預測誤差。但投資組合構建只需
 
 **標準化**：與其他宏觀特徵相同，使用 52 週滾動 z-score
 
+### 3.2 Look-Ahead Bias 分析
+
+Trump 社群媒體特徵（indices 44–48）**不存在 look-ahead bias**。以下逐步驗證：
+
+#### 3.2.1 原始特徵計算（`fetch_trump.py`）
+
+```python
+week_posts = [p for p in parsed if week_start < p["dt"] <= week_end]
+```
+
+每週的 5 個特徵（post_count, caps_ratio, tariff_score, crypto_score, sentiment）僅使用 `(dates[t-1], dates[t]]` 區間內的貼文計算。**不使用未來資料**。
+
+#### 3.2.2 滾動 z-score 標準化（`prepare_btc_data.py`）
+
+```python
+roll_mean = ser.rolling(52, min_periods=4).mean()  # window = [t-51, ..., t]
+roll_std  = ser.rolling(52, min_periods=4).std()
+z[t] = (col[t] - roll_mean[t]) / roll_std[t]
+```
+
+`rolling(52)` 在時間 t 使用 `[t-51, ..., t]` 的資料，**僅包含過去和當前值**。當前值包含在自身標準化中（~1/52 = 1.9% 權重），這是金融時間序列的標準做法（如 Gu, Kelly & Xiu 2020 對股票特徵的處理）。
+
+可選改善：加 `.shift(1)` 使標準化更嚴格（僅用 t-1 以前的資料），但實質影響極小。
+
+#### 3.2.3 已知偏誤（非 Trump 特有）
+
+| 偏誤類型 | 描述 | 影響 |
+|----------|------|------|
+| **存活偏誤** | 86 資產依 2026-03 市值選取 | 所有特徵共同存在，非 Trump 特有 |
+| **覆蓋率缺口** | Truth Social: 2022-02→2024-06, X: 2025-01→2026-03 | 中間 ~6 個月為 UNK，正確行為 |
+
+#### 3.2.4 結論
+
+Trump 特徵在特徵計算和標準化兩個環節均**嚴格使用過去和當前資料**，不存在 look-ahead bias。唯一的設計選擇（rolling window 包含當前值）是金融計量學的標準做法。
+
 **Chronological split (70 / 15 / 15):**
 - Train: weeks 0–226 (227 weeks) — 預設
 - Train (+Trump): weeks ~115–226 (~112 weeks) — 從 Trump 資料覆蓋開始，自動偵測
@@ -187,7 +223,7 @@ v4 使用 MSE 損失，最小化絕對預測誤差。但投資組合構建只需
 ### Prerequisites
 
 ```bash
-pip install torch numpy matplotlib scipy
+pip install torch numpy matplotlib scipy scikit-learn
 ```
 
 ### One-click execution (全部一鍵執行)
@@ -206,11 +242,16 @@ python train.py --config config.json --model tft
 # Step 2: Train LSTM v5 (32 seeds × 4 info sets, ~34 min on GPU)
 python train.py --config config.json --model lstm
 
-# Step 3: Evaluate TFT
-python evaluate.py --config config.json --model tft
+# Step 3: Train traditional models (OLS, EN, PCA, PLS, RF, GBT, ~4 min)
+python train_traditional.py --config config.json
 
-# Step 4: Evaluate LSTM
+# Step 4: Evaluate individual models
+python evaluate.py --config config.json --model tft
 python evaluate.py --config config.json --model lstm
+python evaluate.py --config config.json --model ols  # etc.
+
+# Step 5: Cross-model comparison table
+python evaluate.py --config config.json --compare-all
 ```
 
 ### Outputs
@@ -297,14 +338,15 @@ outputs/
 
 ### 6.3 Full Cross-Model Comparison / 全模型比較 (SR PW, Long-Short)
 
-| Information Set | Gated FFN (v3) | TFT v4 | **TFT v5.2** | LSTM v4 | **LSTM v5.2** |
-|-----------------|----------------|--------|:-----------:|---------|:------------:|
-| **Price+Technical** | **+2.10** (t=2.04) ✓ | −0.04 | +0.08 | −1.25 | **+0.89** |
-| **+Onchain** | −0.95 | −0.89 | −0.39 | −1.27 | **+0.63** |
-| **All features** | **+2.90** (t=2.82) ✓✓ | +0.08 | −0.03 | +1.08 | −0.45 |
-| **+Trump** | N/A | N/A | +0.15 | N/A | **+0.44** |
+| Information Set | EW Mkt | Gated FFN | OLS | EN | PCA | PLS | RF | GBT | TFT v5.2 | LSTM v5.2 |
+|-----------------|:------:|:---------:|:---:|:--:|:---:|:---:|:--:|:---:|:--------:|:---------:|
+| **Price+Technical** | −0.60 | **+2.10** | +1.21 | +1.28 | +0.39 | +0.64 | +1.07 | +1.28 | +0.08 | +0.89 |
+| **+Onchain** | −0.60 | −0.95 | +1.09 | +1.28 | +0.42 | +0.62 | +0.62 | +1.25 | −0.39 | +0.63 |
+| **All features** | −0.60 | **+2.90** | +1.19 | +1.28 | +0.46 | +0.62 | **+2.63** | +1.57 | −0.03 | −0.45 |
+| **+Trump** | −0.60 | N/A | +1.29 | +1.09 | +0.37 | +0.83 | +1.01 | +1.12 | +0.15 | +0.44 |
 
-> **LSTM v5.2 Price+Technical (SR=+0.89) 是所有時間序列模型中的最佳表現。**
+> **新發現：傳統模型（OLS, ElasticNet, RF, GBT）全面優於 LSTM/TFT 時間序列模型。**
+> Random Forest All features (SR=+2.63) 接近 Gated FFN (SR=+2.90)，且無需深度學習。
 
 ### 6.4 Decile Analysis / 十分位分析
 
@@ -342,6 +384,43 @@ v5.2 使用 32 seeds × 4 feature configs = 128 次訓練。GPU（RTX 3060 Ti）
 ### 6.6 TFT Variable Selection Importance / TFT 特徵重要性（LightVSN 權重）
 
 TFT v5 的 LightVSN 仍提供可解釋的特徵重要性權重（平均 softmax 權重）。由於使用了更輕量的架構和排序損失，特徵權重分佈與 v4 可能有所不同。
+
+### 6.7 Traditional Model Baselines (v5.3 新增)
+
+**Long-Short SR (PW) — Test Period, 48 weeks:**
+
+| Information Set | OLS | ElasticNet | PCA | PLS | RF | GBT |
+|-----------------|:---:|:----------:|:---:|:---:|:--:|:---:|
+| Price+Technical (11) | +1.21 | +1.28 | +0.39 | +0.64 | +1.07 | **+1.47** |
+| +Onchain (16) | +1.09 | +1.28 | +0.42 | +0.62 | +0.62 | +1.25 |
+| All (33) | +1.19 | +1.28 | +0.46 | +0.62 | **+2.63** | +1.57 |
+| +Trump (38) | **+1.29** | +1.09 | +0.37 | +0.83 | +1.01 | +1.12 |
+
+**Best hyperparameters (validation SR tuning):**
+
+| Model | Best config | Best params |
+|-------|-------------|-------------|
+| OLS | +Trump (SR=+1.29) | — (no tuning) |
+| ElasticNet | Price+Tech (SR=+1.28) | α=0.01, L1=0.9 |
+| PCA Regression | All (SR=+0.46) | n_components=5 |
+| PLS | +Trump (SR=+0.83) | n_components=1 |
+| Random Forest | All (SR=+2.63) | max_depth=5, max_features=0.33, n_trees=300 |
+| Gradient Boosting | All (SR=+1.57) | max_depth=2, lr=0.01, n_trees=100 |
+
+**觀察：**
+1. **OLS 是最穩定的傳統模型**：所有特徵組 SR 均在 +1.09–1.29，表明線性因子足以產生穩定的排序信號
+2. **ElasticNet 高 L1 ratio (0.9)** → 接近 Lasso，對所有非 Trump 特徵組選擇相同的稀疏特徵子集（SR 一致為 +1.28）
+3. **Random Forest All features 表現最佳 (SR=+2.63)**：非線性特徵交互在完整特徵集上最為有效，接近 Gated FFN 的 +2.90
+4. **PCA/PLS 表現最差**：降維損失了重要的橫截面排序信息
+
+### 6.8 Market Portfolio Benchmark (v5.3 新增)
+
+| Portfolio | mean%/week | SR (ann.) | T |
+|-----------|:----------:|:---------:|:-:|
+| **EW Market** (equal-weighted) | −0.76 | **−0.60** | 48 |
+| VW Market (value-weighted) | N/A | N/A | — |
+
+測試期間（2024-11 至 2026-03）加密市場整體下跌，EW 市場組合 SR=−0.60。所有機器學習模型均優於市場組合，驗證了橫截面排序策略的有效性。
 
 ---
 
@@ -401,29 +480,51 @@ LSTM v5.2 All features 從 SR=+1.08 降至 −0.45，原因可能是：
 - +Trump 訓練集較小（104 vs 218 batches），但 32 seeds ensemble 緩解了高變異問題
 - 因果方向不明確：Trump 可能是對市場的反應而非驅動因素
 
-### 7.5 核心結論：Gated FFN 仍然是最佳選擇
+### 7.5 v5.3 傳統模型基準：簡單模型的啟示
 
-即便加入 Trump 特徵後有所改善，Gated FFN (v3) 仍以巨大優勢領先：
+v5.3 加入的傳統模型基準揭示了一個重要發現：**即便是最簡單的 OLS，也全面優於 LSTM/TFT 時間序列模型**。
 
-| Criterion | Gated FFN (v3) | TFT v5.2 best | LSTM v5.2 best |
-|-----------|----------------|:------:|:------:|
-| **Best SR (PW)** | **+2.90** ✓✓ | +0.15 (+Trump) | **+0.89** (Price+Tech) |
-| **Decile L−S** | **+2.79** ✓✓ | +0.36 | +0.85 |
-| **Training time (GPU)** | ~30 min | 54 min (32s) | 34 min (32s) |
-| **Parameter count** | **~4K** ✓✓ | ~32K | ~19K |
+| Rank | Model | Best SR (PW) | Best Config | Params | Temporal? |
+|------|-------|:---:|-------------|:------:|:---------:|
+| 1 | **Gated FFN** (v3) | **+2.90** | All | ~4K | ✗ |
+| 2 | **Random Forest** | **+2.63** | All (EW) | — | ✗ |
+| 3 | **Gradient Boosting** | +1.57 | All | — | ✗ |
+| 4 | **OLS** | +1.29 | +Trump | — | ✗ |
+| 5 | **ElasticNet** | +1.28 | Price+Tech | — | ✗ |
+| 6 | **LSTM v5.2** | +0.89 | Price+Tech | ~18K | ✓ |
+| 7 | **PLS** | +0.83 | +Trump | — | ✗ |
+| 8 | **PCA Regression** | +0.46 | All | — | ✗ |
+| 9 | **TFT v5.2** | +0.15 | +Trump | ~31K | ✓ |
+| 10 | **EW Market** | −0.60 | — | — | — |
 
-**v5 的改善證實了我們診斷的部分缺陷確實是真實的**（尤其是 Ranking Loss 和 Cross-Asset Attention 對 LSTM 的幫助），**但無法彌合橫截面模型的根本優勢**：
+**關鍵洞見：**
 
-> 對於週頻加密貨幣橫截面報酬排序，純橫截面模型（Gated FFN, 4K 參數）仍遠優於經過充分改善的時間序列模型（LSTM v5, 18K 參數）。時間序列建模提供的歷史記憶無法彌補「同時看到所有資產」的橫截面優勢。
+1. **模型複雜度 ≠ 排序能力**：OLS（無超參數）的 SR=+1.29 是 LSTM v5.2 (+0.89) 的 1.4 倍、TFT v5.2 (+0.15) 的 8.6 倍
+2. **非線性特徵交互有價值**：RF (SR=+2.63) 和 GBT (SR=+1.57) 在 All features 上大幅領先 OLS (SR=+1.19)，說明特徵間的非線性交互確實提供排序信息
+3. **時間序列建模是負擔而非資產**：時間序列模型（LSTM, TFT）需要學習額外的時序模式，但這些模式在週頻加密市場中不穩定，反而增加了過擬合風險
+4. **降維方法（PCA, PLS）不適合排序任務**：最大方差方向不一定是最佳排序方向
+5. **市場組合 SR=−0.60** 確認測試期為下跌市場，所有模型的正 SR 均來自橫截面排序而非市場漲幅
 
-### 7.6 改善的價值：診斷性洞見
+### 7.6 核心結論：橫截面模型完勝時間序列模型
 
-儘管 v5 未能超越 Gated FFN，改善過程提供了有價值的診斷性洞見：
+| Criterion | Gated FFN (v3) | RF | GBT | OLS | LSTM v5.2 | TFT v5.2 |
+|-----------|:-:|:-:|:-:|:-:|:-:|:-:|
+| **Best SR (PW)** | **+2.90** ✓✓ | **+2.63** ✓ | +1.57 | +1.29 | +0.89 | +0.15 |
+| **Training time** | ~30 min | ~4 min | ~4 min | <1 sec | 34 min | 54 min |
+| **需要 GPU** | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+| **需要時序窗口** | ✗ | ✗ | ✗ | ✗ | ✓ (L=8) | ✓ (L=8) |
+
+> 對於週頻加密貨幣橫截面報酬排序，**當期橫截面特徵足以產生穩定的排序信號**。時間序列建模不僅未能提供增量價值，反而引入了額外的過擬合風險和計算成本。最簡單的 OLS 即可超越精心設計的 LSTM+CrossAttention+ListNet 架構。
+
+### 7.7 改善的價值：診斷性洞見
+
+儘管 v5 的 LSTM/TFT 未能超越傳統模型，改善過程提供了有價值的診斷性洞見：
 
 1. **Ranking Loss 有效**：將訓練目標對齊評估指標，確實改善了排序品質（LSTM Price+Tech: −1.25 → +0.89）
 2. **Cross-Asset Attention 有效**：讓獨立處理的時間序列模型獲得跨資產比較能力，改善了排序
 3. **降低容量有效**：18K 參數的 LSTM v5 優於 82K 參數的 LSTM v4，驗證了過擬合是 v4 的主要問題
-4. **但根本限制仍在**：即便有排序損失和跨資產注意力，時序模型仍需通過「先獨立編碼，後跨資產比較」的兩步流程，而橫截面模型天然地在一步中完成比較
+4. **但根本限制仍在**：即便有排序損失和跨資產注意力，時序模型仍需通過「先獨立編碼，後跨資產比較」的兩步流程，增加了不必要的複雜度
+5. **傳統模型基準不可或缺**：若未加入 OLS/RF/GBT 基準，我們可能錯誤地將 LSTM v5.2 的 SR=+0.89 視為有意義的成果
 
 ---
 
@@ -452,28 +553,28 @@ LSTM v5.2 All features 從 SR=+1.08 降至 −0.45，原因可能是：
 
 ---
 
-## 10. v4 → v5.2 Changes Summary / 改版摘要
+## 10. v4 → v5.3 Changes Summary / 改版摘要
 
-| Component | v4 | v5.2 |
-|-----------|----|----|
-| **Loss function** | MSE | **ListNet ranking loss** |
-| **Training paradigm** | Random (asset, time) pairs | **Cross-sectional batches** |
-| **Cross-asset** | None | **Self-Attention (2 heads)** |
-| **VSN** | Full GRN (55K params for M=33) | **LightVSN (5K params)** |
-| **Hidden dim** | 64 | **32** |
-| **LSTM layers** | 2 | **1** |
-| **Dropout** | 0.15 | **0.30** |
-| **Weight decay** | 1e-5 | **1e-4** |
-| **Lookback** | 12 | **8** |
-| **Position encoding** | None | **Learnable** |
-| **LR warmup** | None | **10 epochs linear** |
-| **Num seeds** | 8 | **32** |
-| **Deterministic** | No | **Yes (CUDA deterministic)** |
-| **Trump-aware train** | N/A | **Auto-detect start week** |
-| **TFT params** | 209-368K | **29-31K** |
-| **LSTM params** | 81-83K | **18K** |
-| **TFT train time** | 120 min (CPU, 8s) | **53.8 min (GPU, 32s)** |
-| **LSTM train time** | 17 min (CPU, 8s) | **33.9 min (GPU, 32s)** |
+| Component | v4 | v5.2 | v5.3 |
+|-----------|----|----|------|
+| **Loss function** | MSE | **ListNet ranking loss** | — |
+| **Training paradigm** | Random (asset, time) pairs | **Cross-sectional batches** | — |
+| **Cross-asset** | None | **Self-Attention (2 heads)** | — |
+| **VSN** | Full GRN (55K params for M=33) | **LightVSN (5K params)** | — |
+| **Hidden dim** | 64 | **32** | — |
+| **LSTM layers** | 2 | **1** | — |
+| **Dropout** | 0.15 | **0.30** | — |
+| **Weight decay** | 1e-5 | **1e-4** | — |
+| **Lookback** | 12 | **8** | — |
+| **Position encoding** | None | **Learnable** | — |
+| **LR warmup** | None | **10 epochs linear** | — |
+| **Num seeds** | 8 | **32** | — |
+| **Deterministic** | No | **Yes (CUDA deterministic)** | — |
+| **Trump-aware train** | N/A | **Auto-detect start week** | — |
+| **Traditional baselines** | N/A | N/A | **OLS, EN, PCA, PLS, RF, GBT** |
+| **Market benchmark** | N/A | N/A | **EW Market Portfolio** |
+| **Look-ahead bias** | N/A | N/A | **Verified: none** |
+| **Cross-model compare** | N/A | N/A | **10 models × 4 configs** |
 
 ---
 
@@ -481,17 +582,26 @@ LSTM v5.2 All features 從 SR=+1.08 降至 −0.45，原因可能是：
 
 ```
 machine_learning_for_crypto_TFT/
-├── README.md                 # This file
-├── config.json               # v5 hyperparameters and feature configs
-├── data_loader.py            # Load btc_panel.npz → cross-sectional batches
-├── models.py                 # LSTM + TFT with Cross-Asset Attention
-├── train.py                  # ListNet ranking loss training loop
-├── evaluate.py               # Portfolio evaluation + visualization
-├── run_all.sh                # One-click execution
+├── README.md                   # This file
+├── config.json                 # Hyperparameters, feature configs, traditional model grids
+├── data_loader.py              # Load btc_panel.npz → cross-sectional batches
+├── models.py                   # LSTM + TFT with Cross-Asset Attention
+├── train.py                    # ListNet ranking loss training loop (DL models)
+├── train_traditional.py        # Traditional ML baselines (OLS, EN, PCA, PLS, RF, GBT)
+├── evaluate.py                 # Portfolio evaluation, comparison tables, visualization
+├── run_all.sh                  # One-click: train all → evaluate → compare
 ├── checkpoints/
-│   ├── tft_results.npz       # TFT ensemble predictions
-│   └── lstm_results.npz      # LSTM ensemble predictions
+│   ├── tft_results.npz         # TFT ensemble predictions
+│   ├── lstm_results.npz        # LSTM ensemble predictions
+│   ├── ols_results.npz         # OLS predictions
+│   ├── elasticnet_results.npz  # ElasticNet predictions
+│   ├── pca_regression_results.npz
+│   ├── pls_results.npz
+│   ├── random_forest_results.npz
+│   ├── gradient_boosting_results.npz
+│   └── market_portfolio.npz    # EW/VW market portfolio benchmark
 └── outputs/
+    ├── cross_model_comparison.csv  # Full model comparison table
     ├── tft_table3.csv
     ├── tft_cumulative_returns.png
     ├── tft_decile_sharpe.png
