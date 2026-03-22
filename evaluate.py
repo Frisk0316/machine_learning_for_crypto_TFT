@@ -367,20 +367,26 @@ def load_market_portfolio(output_dir):
 
 
 def print_market_portfolio(market, label="Market Portfolio"):
-    """Print market portfolio benchmark."""
+    """Print market portfolio benchmark.
+
+    VW Market (value-weighted by market cap) is the primary benchmark when
+    available. EW Market is reported as a secondary reference.
+    Run fetch_market_cap.py in deep_learning_for_crypto/data_sources/ to enable VW.
+    """
     print(f"\n{'='*80}")
     print(f"  {label}")
     print(f"{'='*80}")
     ew_sr = float(market['ew_sr'])
     ew_mean = float(market['ew_mean'])
     T = int(market['T_weeks'])
-    print(f"  EW Market: mean={ew_mean:+.2f}%/week, SR={ew_sr:+.3f}, T={T}")
     if 'vw_sr' in market:
         vw_sr = float(market['vw_sr'])
         vw_mean = float(market['vw_mean'])
-        print(f"  VW Market: mean={vw_mean:+.2f}%/week, SR={vw_sr:+.3f}")
+        print(f"  VW Market [PRIMARY]:  mean={vw_mean:+.2f}%/week  SR={vw_sr:+.3f}  T={T}")
+        print(f"  EW Market [reference]: mean={ew_mean:+.2f}%/week  SR={ew_sr:+.3f}")
     else:
-        print("  VW Market: N/A (no market_cap data)")
+        print(f"  EW Market: mean={ew_mean:+.2f}%/week, SR={ew_sr:+.3f}, T={T}")
+        print("  VW Market: N/A — run fetch_market_cap.py to enable VW benchmark")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -436,30 +442,40 @@ def compare_all_models(cfg):
     # Load market portfolio
     market = load_market_portfolio(output_dir)
 
+    has_vw = market is not None and 'vw_sr' in market
+
+    def _market_cols(header_mode=True):
+        """Return market benchmark column headers or values."""
+        if market is None:
+            return []
+        if header_mode:
+            cols = []
+            if has_vw:
+                cols.append(f"{'VW Mkt':>7s}")
+            cols.append(f"{'EW Mkt':>7s}")
+            return cols
+        else:
+            cols = []
+            if has_vw:
+                cols.append(f"{float(market['vw_sr']):+7.2f}")
+            cols.append(f"{float(market['ew_sr']):+7.2f}")
+            return cols
+
+    disp = [DISPLAY_NAMES.get(m, m) for m in available]
+
     # Print comparison table (SR PW)
     print(f"\n{'='*100}")
     print(f"  Cross-Model Comparison: Long-Short SR (PW)")
+    if has_vw:
+        print(f"  Market benchmark: VW Market (value-weighted by market cap) [primary]")
     print(f"{'='*100}")
 
-    # Header
-    disp = [DISPLAY_NAMES.get(m, m) for m in available]
-    header_parts = [f"{'Info Set':<20s}"]
-    if market is not None:
-        header_parts.append(f"{'EW Mkt':>7s}")
-        if 'vw_sr' in market:
-            header_parts.append(f"{'VW Mkt':>7s}")
-    for d in disp:
-        header_parts.append(f"{d:>8s}")
+    header_parts = [f"{'Info Set':<20s}"] + _market_cols() + [f"{d:>8s}" for d in disp]
     print(f"  {' │ '.join(header_parts)}")
     print(f"  {'─'*(len(header_parts)*10)}")
 
-    # Rows
     for feat_name in feat_names_list:
-        parts = [f"{feat_name:<20s}"]
-        if market is not None:
-            parts.append(f"{float(market['ew_sr']):+7.2f}")
-            if 'vw_sr' in market:
-                parts.append(f"{float(market['vw_sr']):+7.2f}")
+        parts = [f"{feat_name:<20s}"] + _market_cols(header_mode=False)
         for model_name in available:
             srs = model_srs[model_name]
             if feat_name in srs:
@@ -473,22 +489,12 @@ def compare_all_models(cfg):
     print(f"  Cross-Model Comparison: Long-Short SR (EW)")
     print(f"{'='*100}")
 
-    header_parts = [f"{'Info Set':<20s}"]
-    if market is not None:
-        header_parts.append(f"{'EW Mkt':>7s}")
-        if 'vw_sr' in market:
-            header_parts.append(f"{'VW Mkt':>7s}")
-    for d in disp:
-        header_parts.append(f"{d:>8s}")
+    header_parts = [f"{'Info Set':<20s}"] + _market_cols() + [f"{d:>8s}" for d in disp]
     print(f"  {' │ '.join(header_parts)}")
     print(f"  {'─'*(len(header_parts)*10)}")
 
     for feat_name in feat_names_list:
-        parts = [f"{feat_name:<20s}"]
-        if market is not None:
-            parts.append(f"{float(market['ew_sr']):+7.2f}")
-            if 'vw_sr' in market:
-                parts.append(f"{float(market['vw_sr']):+7.2f}")
+        parts = [f"{feat_name:<20s}"] + _market_cols(header_mode=False)
         for model_name in available:
             srs = model_srs[model_name]
             if feat_name in srs:
@@ -506,9 +512,9 @@ def compare_all_models(cfg):
         w = csv.writer(f)
         header = ['Information set']
         if market is not None:
-            header.append('EW_Market_SR')
-            if 'vw_sr' in market:
+            if has_vw:
                 header.append('VW_Market_SR')
+            header.append('EW_Market_SR')
         for m in available:
             header.extend([f'{DISPLAY_NAMES.get(m,m)}_SR_PW',
                           f'{DISPLAY_NAMES.get(m,m)}_SR_EW'])
@@ -517,9 +523,9 @@ def compare_all_models(cfg):
         for feat_name in feat_names_list:
             row = [feat_name]
             if market is not None:
-                row.append(f"{float(market['ew_sr']):.3f}")
-                if 'vw_sr' in market:
+                if has_vw:
                     row.append(f"{float(market['vw_sr']):.3f}")
+                row.append(f"{float(market['ew_sr']):.3f}")
             for model_name in available:
                 srs = model_srs[model_name]
                 if feat_name in srs:

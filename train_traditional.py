@@ -278,14 +278,45 @@ def train_model(model_name, X_train, y_train, data, valid_idx, test_idx,
 # Main pipeline
 # ═══════════════════════════════════════════════════════════════════════
 
+TREE_MODELS = {"random_forest", "gradient_boosting"}
+
+
+def _build_tree_model_with_seed(model_name, params, seed):
+    """Instantiate a RF or GBT model with a specific random seed."""
+    if model_name == "random_forest":
+        return RandomForestRegressor(
+            n_estimators=params.get("n_estimators", 300),
+            max_depth=params["max_depth"],
+            max_features=params["max_features"],
+            random_state=seed, n_jobs=-1
+        )
+    elif model_name == "gradient_boosting":
+        return GradientBoostingRegressor(
+            n_estimators=params["n_estimators"],
+            max_depth=params["max_depth"],
+            learning_rate=params["learning_rate"],
+            subsample=0.8, random_state=seed
+        )
+    raise ValueError(f"Not a tree model: {model_name}")
+
+
 def run_all_models(cfg, data, dates, assets, train_idx, valid_idx, test_idx):
-    """Train all traditional models × all feature configs."""
+    """Train all traditional models × all feature configs.
+
+    Ensemble policy:
+    - OLS / ElasticNet / PCA-OLS / PLS: deterministic given hyperparameters,
+      so a single model is equivalent to an ensemble. Best HP chosen via
+      validation Sharpe.
+    - Random Forest / Gradient Boosting: have random_state → trained with
+      `tree_ensemble_seeds` different seeds (default 5) after HP selection,
+      predictions averaged. Comparable in spirit to the DL 32-seed ensemble.
+    """
     feat_configs = cfg["feature_configs"]
     trump_feat_set = set(cfg.get("trump_feature_indices", [44, 45, 46, 47, 48]))
     trump_start = cfg.get("_detected_train_start_week", 0)
 
-    # Get model-specific config overrides
     trad_cfg = cfg.get("traditional_models", {})
+    tree_seeds = cfg.get("tree_ensemble_seeds", 5)
 
     # Compute EW and VW market portfolio once
     market_results = compute_market_portfolio(data, test_idx)
@@ -294,15 +325,16 @@ def run_all_models(cfg, data, dates, assets, train_idx, valid_idx, test_idx):
                    "random_forest", "gradient_boosting"]
 
     for model_name in model_names:
+        is_tree = model_name in TREE_MODELS
         print(f"\n{'═'*60}")
-        print(f"  Model: {model_name.upper()}")
+        print(f"  Model: {model_name.upper()}"
+              + (f"  [ensemble={tree_seeds} seeds]" if is_tree else "  [deterministic]"))
         print(f"{'═'*60}")
 
         cfg_overrides = trad_cfg.get(model_name, {})
         all_results = {}
 
         for feat_name, feat_indices in feat_configs.items():
-            # Trump-aware training start
             has_trump = bool(trump_feat_set & set(feat_indices))
             if has_trump and trump_start > 0:
                 effective_train_idx = range(trump_start, train_idx.stop)
@@ -312,13 +344,12 @@ def run_all_models(cfg, data, dates, assets, train_idx, valid_idx, test_idx):
                 effective_train_idx = train_idx
                 print(f"\n  {feat_name} ({len(feat_indices)} features)")
 
-            # Prepare flat training data
             X_train, y_train, _ = prepare_flat_data(
                 data, effective_train_idx, feat_indices
             )
             print(f"    Training samples: {len(y_train)}")
 
-            # Train with hyperparameter tuning
+            # ── Hyperparameter selection (all models) ──
             model, pca, val_sr, best_params = train_model(
                 model_name, X_train, y_train, data,
                 valid_idx, test_idx, feat_indices, cfg_overrides
@@ -331,12 +362,33 @@ def run_all_models(cfg, data, dates, assets, train_idx, valid_idx, test_idx):
             print(f"    Best params: {best_params}")
             print(f"    Val SR: {val_sr:+.3f}")
 
-            # Predict on test set
-            preds_t, tgts_t, msks_t = predict_cross_sectional(
-                model, data, test_idx, feat_indices, pca_model=pca
-            )
-            test_sr = compute_sharpe(preds_t, tgts_t, msks_t)
-            print(f"    Test SR: {test_sr:+.3f}")
+            if is_tree:
+                # ── Tree ensemble: average predictions from multiple seeds ──
+                seed_pred_lists = {t: [] for t in test_idx}
+                tgts_t, msks_t = None, None
+
+                for seed in range(tree_seeds):
+                    m = _build_tree_model_with_seed(model_name, best_params, seed)
+                    m.fit(X_train, y_train)
+                    preds_s, tgts_s, msks_s = predict_cross_sectional(
+                        m, data, test_idx, feat_indices
+                    )
+                    for t in test_idx:
+                        seed_pred_lists[t].append(preds_s[t])
+                    if tgts_t is None:
+                        tgts_t, msks_t = tgts_s, msks_s  # same across seeds
+
+                preds_t = {t: np.mean(seed_pred_lists[t], axis=0)
+                           for t in test_idx}
+                test_sr = compute_sharpe(preds_t, tgts_t, msks_t)
+                print(f"    Test SR (ensemble of {tree_seeds}): {test_sr:+.3f}")
+            else:
+                # ── Deterministic models: single best model ──
+                preds_t, tgts_t, msks_t = predict_cross_sectional(
+                    model, data, test_idx, feat_indices, pca_model=pca
+                )
+                test_sr = compute_sharpe(preds_t, tgts_t, msks_t)
+                print(f"    Test SR: {test_sr:+.3f}")
 
             all_results[feat_name] = {
                 "preds": preds_t,
@@ -346,7 +398,6 @@ def run_all_models(cfg, data, dates, assets, train_idx, valid_idx, test_idx):
                 "test_sr": test_sr,
             }
 
-        # Save results in NPZ format (compatible with evaluate.py)
         _save_results(model_name, all_results, data, dates, assets,
                       test_idx, cfg["output_dir"])
 
@@ -358,18 +409,29 @@ def run_all_models(cfg, data, dates, assets, train_idx, valid_idx, test_idx):
 
 
 def compute_market_portfolio(data, test_idx):
-    """Compute equal-weighted (and VW if market_cap available) market portfolio."""
-    # Check for market cap data
-    npz_path = None
-    try:
-        npz = np.load(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "..", "deep_learning_for_crypto", "datasets", "btc_panel.npz"),
-            allow_pickle=True
-        )
-        market_cap = npz.get("market_cap", None)
-    except Exception:
-        market_cap = None
+    """Compute equal-weighted and value-weighted (VW) market portfolio.
+
+    VW uses actual market cap if available (from market_cap.npz or btc_panel.npz).
+    Run `python data_sources/fetch_market_cap.py` inside deep_learning_for_crypto/
+    to generate market_cap.npz, then VW will be used as the primary benchmark.
+    """
+    datasets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "..", "deep_learning_for_crypto", "datasets")
+
+    # Try dedicated market_cap.npz first, then fall back to btc_panel.npz
+    market_cap = None
+    for mcap_path in [
+        os.path.join(datasets_dir, "market_cap.npz"),
+        os.path.join(datasets_dir, "btc_panel.npz"),
+    ]:
+        try:
+            npz = np.load(mcap_path, allow_pickle=True)
+            market_cap = npz.get("market_cap", None)
+            if market_cap is not None:
+                print(f"  Loaded market cap from: {os.path.basename(mcap_path)}")
+                break
+        except Exception:
+            continue
 
     # Equal-weighted market portfolio
     ew_returns = []

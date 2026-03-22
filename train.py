@@ -67,7 +67,17 @@ def compute_sharpe(predictions, targets, masks, annualise=52):
     Compute long-short Sharpe ratio from cross-sectional predictions.
 
     At each time step, rank assets by prediction, go long top decile,
-    short bottom decile (equal-weight).
+    short bottom decile (equal-weight within each decile).
+
+    Portfolio weighting: EW (equal-weight) is the standard choice in academic
+    cross-sectional return prediction (cf. Gu, Kelly, Xiu 2020). It tests
+    the model's ability to rank uniformly across the universe without bias
+    toward large-cap assets. VW (market-cap-weighted) metrics are reported
+    separately in evaluate.py once market_cap data is available.
+
+    Note: features in btc_panel.npz are already cross-sectionally rank-
+    normalized (cat. A-C) and time-series z-score normalized (cat. D-G)
+    by prepare_btc_data.py. No additional normalization is applied here.
     """
     weekly_returns = []
     for t_key in sorted(predictions.keys()):
